@@ -103,8 +103,14 @@ func (w *FileWorkspace) Clone(
 		// We're prefix matching here because BitBucket doesn't give us the full
 		// commit, only a 12 character prefix.
 		if strings.HasPrefix(currCommit, p.HeadCommit) {
-			log.Debug("repo is at correct commit %q so will not re-clone", p.HeadCommit)
-			return cloneDir, w.warnDiverged(log, p, headRepo, cloneDir), nil
+			diverged := w.warnDiverged(log, p, headRepo, cloneDir)
+			if !diverged {
+				log.Debug("repo is at correct commit %q so will not re-clone", p.HeadCommit)
+				return cloneDir, diverged, nil
+			} else {
+				log.Debug("repo is at correct commit %q but has diverged from master. Will re-clone", p.HeadCommit)
+				return cloneDir, diverged, w.forceClone(log, cloneDir, headRepo, p)
+			}
 		}
 
 		log.Debug("repo was already cloned but is not at correct commit, wanted %q got %q", p.HeadCommit, currCommit)
@@ -146,6 +152,9 @@ func (w *FileWorkspace) warnDiverged(log *logging.SimpleLogger, p models.PullReq
 		{
 			"git", "remote", "update",
 		},
+		//{
+		//	"git", "merge", "-q", "--no-ff", "-m", "atlantis-merge", "FETCH_HEAD",
+		//},
 	}
 
 	for _, args := range cmds {
@@ -212,6 +221,9 @@ func (w *FileWorkspace) forceClone(log *logging.SimpleLogger,
 		cmds = [][]string{
 			{
 				"git", "clone", "--branch", p.BaseBranch, "--single-branch", baseCloneURL, cloneDir,
+			},
+			{
+				"git", "reset", "--hard", fmt.Sprintf("origin/%s", p.BaseBranch),
 			},
 			{
 				"git", "remote", "add", "head", headCloneURL,

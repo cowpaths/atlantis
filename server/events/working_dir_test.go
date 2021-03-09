@@ -1,11 +1,15 @@
 package events_test
 
 import (
+	"bytes"
 	"crypto/tls"
 	"fmt"
+	"github.com/runatlantis/atlantis/server/logging"
+	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/runatlantis/atlantis/server/events"
@@ -407,4 +411,113 @@ func initRepo(t *testing.T) (string, func()) {
 	runCmd(t, repoDir, "git", "commit", "-m", "initial commit")
 	runCmd(t, repoDir, "git", "branch", "branch")
 	return repoDir, cleanup
+}
+
+func TestClone_CheckoutMergeMovingTarget(t *testing.T) {
+	// Initialize the git repo.
+	repoDir, cleanup := initRepo(t)
+	defer cleanup()
+
+	const f1, f2 = "file1", "file2"
+	const c1a, c1b, c2a, c2b = "hello world", "goodbye world", "line 1", "line 2"
+
+	// Add a commit to branch 'branch' that's not on master.
+	runCmd(t, repoDir, "git", "checkout", "branch")
+	runCmd(t, repoDir, "sh", "-c", fmt.Sprintf("echo %q >> %s", c1a, f1))
+	runCmd(t, repoDir, "git", "add", f1)
+	runCmd(t, repoDir, "git", "commit", "-m", "branch-commit 1")
+
+	// Add a new commit to master
+	runCmd(t, repoDir, "git", "checkout", "master")
+	runCmd(t, repoDir, "sh", "-c", fmt.Sprintf("echo %q >> %s", c2a, f2))
+	runCmd(t, repoDir, "git", "add", f2)
+	runCmd(t, repoDir, "git", "commit", "-m", "master-commit 1")
+
+	// We're set up, now trigger the Atlantis clone.
+	dataDir, cleanup2 := TempDir(t)
+	defer cleanup2()
+	overrideURL := fmt.Sprintf("file://%s", repoDir)
+	wd := &events.FileWorkspace{
+		DataDir:                     dataDir,
+		CheckoutMerge:               true,
+		TestingOverrideHeadCloneURL: overrideURL,
+		TestingOverrideBaseCloneURL: overrideURL,
+	}
+
+	cloneDir, hasDiverged, err := wd.Clone(nil, models.Repo{}, models.PullRequest{
+		HeadBranch: "branch",
+		BaseBranch: "master",
+	}, "default")
+	Ok(t, err)
+
+	//Equals(t, hasDiverged, false)
+	t.Run(f1+"a", func(t *testing.T) {
+		b, err := ioutil.ReadFile(filepath.Join(cloneDir, f1))
+		Ok(t, err)
+		Equals(t, c1a, strings.TrimSpace(string(b)))
+	})
+
+	t.Run(f2+"a", func(t *testing.T) {
+		b, err := ioutil.ReadFile(filepath.Join(cloneDir, f2))
+		Ok(t, err)
+		Equals(t, c2a, strings.TrimSpace(string(b)))
+	})
+
+	// Change master after the clone
+	runCmd(t, repoDir, "git", "checkout", "master")
+	runCmd(t, repoDir, "sh", "-c", fmt.Sprintf("echo %q >> %s", c2b, f2))
+	runCmd(t, repoDir, "git", "add", f2)
+	runCmd(t, repoDir, "git", "commit", "-m", "master-commit 2")
+
+	logBytes := bytes.NewBuffer(nil)
+	l := logging.NewNoopLogger()
+	l.SetLevel(logging.Debug)
+	l.Logger.SetOutput(logBytes)
+	cloneDir, hasDiverged, err = wd.Clone(l, models.Repo{}, models.PullRequest{
+		HeadBranch: "branch",
+		BaseBranch: "master",
+	}, "default")
+	Ok(t, err)
+
+	Equals(t, hasDiverged, false)
+
+	t.Logf("2nd clone got the following output:%s", logBytes.String())
+
+	t.Logf("ls result:\n%s", runCmd(t, cloneDir, "ls", "-la"))
+
+	t.Run(f2+"b", func(t *testing.T) {
+		b, err := ioutil.ReadFile(filepath.Join(cloneDir, f2))
+		Ok(t, err)
+		Equals(t, c2a+"\n"+c2b, strings.TrimSpace(string(b)))
+	})
+
+	// Change this branch after the clone
+	runCmd(t, repoDir, "git", "checkout", "branch")
+	runCmd(t, repoDir, "sh", "-c", fmt.Sprintf("echo %q >> %s", c1b, f1))
+	runCmd(t, repoDir, "git", "add", f1)
+	runCmd(t, repoDir, "git", "commit", "-m", "branch-commit 2")
+
+	logBytes.Reset()
+	cloneDir, hasDiverged, err = wd.Clone(l, models.Repo{}, models.PullRequest{
+		HeadBranch: "branch",
+		BaseBranch: "master",
+	}, "default")
+	Ok(t, err)
+	Equals(t, hasDiverged, true)
+
+	t.Logf("3nd clone got the following output:%s", logBytes.String())
+
+	t.Logf("ls result:\n%s", runCmd(t, cloneDir, "ls", "-la"))
+
+	t.Run(f1+"b", func(t *testing.T) {
+		b, err := ioutil.ReadFile(filepath.Join(cloneDir, f1))
+		Ok(t, err)
+		Equals(t, c1a+"\n"+c1b, strings.TrimSpace(string(b)))
+	})
+
+	t.Run(f2+"b2", func(t *testing.T) {
+		b, err := ioutil.ReadFile(filepath.Join(cloneDir, f2))
+		Ok(t, err)
+		Equals(t, c2a+"\n"+c2b, strings.TrimSpace(string(b)))
+	})
 }
