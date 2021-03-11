@@ -109,7 +109,7 @@ func (w *FileWorkspace) Clone(
 				return cloneDir, diverged, nil
 			} else {
 				log.Debug("repo is at correct commit %q but has diverged from master. Will re-clone", p.HeadCommit)
-				return cloneDir, diverged, w.forceClone(log, cloneDir, headRepo, p)
+				return cloneDir, false, w.forceClone(log, cloneDir, headRepo, p)
 			}
 		}
 
